@@ -1,0 +1,34 @@
+# Dockerfile.api (hardened)
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONFAULTHANDLER=1
+
+WORKDIR /app
+
+# 1) OS 보안 패치 적용 + 최소 패키지만 설치 + 이미지 정리
+RUN apt-get update \
+ && apt-get -y upgrade \
+ && apt-get install -y --no-install-recommends ca-certificates tini \
+ && rm -rf /var/lib/apt/lists/*
+
+# 2) venv로 격리해 라이브러리만 포함
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# 3) 최신 휠 설치(패치 반영)
+COPY requirements.txt ./
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+ && pip install --no-cache-dir -r requirements.txt
+
+# 4) 앱 소스 복사
+COPY . .
+
+# 5) 비루트 실행
+USER 65532:65532
+
+EXPOSE 8000
+ENTRYPOINT ["tini","-g","--"]
+CMD ["sh","-c","uvicorn api:app --host 0.0.0.0 --port ${PORT:-8000}"]
