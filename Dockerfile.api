@@ -1,34 +1,32 @@
-# Dockerfile.api (hardened)
 FROM python:3.11-slim-bookworm
 
+# 기본 안전/로케일
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PYTHONFAULTHANDLER=1
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONIOENCODING=UTF-8 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+# ✅ OS 보안 패치 적용
+RUN apt-get update && apt-get -y upgrade --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# 1) OS 보안 패치 적용 + 최소 패키지만 설치 + 이미지 정리
-RUN apt-get update \
- && apt-get -y upgrade \
- && apt-get install -y --no-install-recommends ca-certificates tini \
- && rm -rf /var/lib/apt/lists/*
+# 의존성
+COPY requirements.txt .
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir -r requirements.txt
 
-# 2) venv로 격리해 라이브러리만 포함
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-# 3) 최신 휠 설치(패치 반영)
-COPY requirements.txt ./
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
- && pip install --no-cache-dir -r requirements.txt
-
-# 4) 앱 소스 복사
+# 데이터/코드
+COPY ./raw_data ./raw_data
+COPY ./local_hints ./local_hints
 COPY . .
 
-# 5) 비루트 실행
-USER 65532:65532
+# (선택) 비루트 실행
+RUN useradd -u 10001 -m appuser
+USER appuser
 
 EXPOSE 8000
-ENTRYPOINT ["tini","-g","--"]
-CMD ["sh","-c","uvicorn api:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["uvicorn","api:app","--host","0.0.0.0","--port","8000"]
