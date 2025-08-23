@@ -3,6 +3,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional
 import pandas as pd
 
 # main.py의 로직 재사용 (import만 하면 __main__이 아니라 인터랙티브 루프는 실행 안 됨)
@@ -49,8 +50,15 @@ class RegionReq(BaseModel):
     region: str
 
 class IndustryReq(BaseModel):
-    type_small: str
-    topk: int = 5
+    sex: Optional[str] = None              # "남성" / "여성" 등 (옵션)
+    type_large: Optional[str] = None       # "음식"
+    type_medium: Optional[str] = None      # "일식"
+    type_small: str                        # "일식 면 요리"  ← 기존 필드 그대로 사용
+    budget: Optional[str] = None           # "4,000만원 이하"
+    topk: int = 2
+
+    class Config:
+        extra = "ignore"   # 추가로 들어오는 필드가 있어도 422 안 나게 무시
 
 @app.get("/healthz")
 def healthz():
@@ -62,4 +70,4 @@ def report_region(req: RegionReq):
 
 @app.post("/report/industry")
 def report_industry(req: IndustryReq):
-    return build_industry_report(req.type_small.strip(), dfs, topk=req.topk)
+    return build_industry_report(req.type_small.strip(), dfs, topk=2)

@@ -1,1 +1,9 @@
-raw_data/.env
+.env
+.venv/
+__pycache__/
+*.pyc
+outputs/
+raw_data/without/
+__pycache__/
+*.pyc
+raw_data/Data_source_name.txt

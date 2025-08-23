@@ -1313,10 +1313,9 @@ def build_industry_report(type_small: str, dfs: dict, topk: int = 5) -> dict:
     out = {
         "type_small": type_small,
         "biz_feature": biz_text,
-        "meta": {
-            "rerank_used": bool(reranked),
-            "rerank_model": RERANK_MODEL if reranked else None
-        },
+        # "meta": {
+            # "rerank_used": bool(reranked),
+            #"rerank_model": RERANK_MODEL if reranked else None
         "recommendations": []
     }
 
