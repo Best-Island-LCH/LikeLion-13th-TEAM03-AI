@@ -28,8 +28,9 @@ flowchart LR
   end
 
   API <-->|stdout logs| UVICORN
+```
 
-
+```mermaid
 sequenceDiagram
   participant C as Client (FE/BE)
   participant A as FastAPI (api.py)
@@ -49,15 +50,16 @@ sequenceDiagram
   M->>H: 지역 힌트 문장 병합
   M-->>A: 리포트 JSON
   A-->>C: 200 OK + JSON
+```
 
-
+```mermaid
 flowchart TB
   Dev[로컬 개발] --> GH[GitHub Repo]
   GH --> CI[Railway Build]
   CI --> IMG[Container Image]
   IMG --> RUNTIME[Railway Runtime (asia-southeast1 ...)]
   RUNTIME -->|Public URL| User
-
+```
 
 # 헬스체크
 curl -sS https://<your-public-url>/healthz
