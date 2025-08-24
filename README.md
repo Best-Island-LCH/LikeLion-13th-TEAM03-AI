@@ -57,8 +57,8 @@ flowchart TB
   Dev[로컬 개발] --> GH[GitHub Repo]
   GH --> CI[Railway Build]
   CI --> IMG[Container Image]
-  IMG --> RUNTIME[Railway Runtime (asia-southeast1 ...)]
-  RUNTIME -->|Public URL| User
+  IMG --> RUNTIME[Railway Runtime \(asia-southeast1\)]
+  RUNTIME -- "Public URL" --> User
 ```
 
 # 헬스체크
