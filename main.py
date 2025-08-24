@@ -1124,55 +1124,134 @@ def _industry_score_and_reason(
         reason["임대료"] = f"서울 평균 대비 {rent_ratio_to_seoul*100:.0f}% 수준으로 {'높음' if rent_ratio_to_seoul>=1.1 else '안정적 수준' if rent_ratio_to_seoul>=0.95 else '비교적 낮음'}"
     reason["상권특징"] = LOCAL_HINTS.get(dong, "해당 행정동의 입지 특성 데이터가 없습니다.")
 
-    # ---- biz_feature에서 키워드 추출하여 reason 보강 ----
+    # ---- biz_feature에서 키워드 추출 → 요약형 'LLM평가' 생성 ----
     topics = _extract_topics_from_biz_feature(biz_feature_text)
+
+    # 점수 초기값과 요약 이유 조각들
+    score = 80
+    bits = []
 
     # 유동인구
     sig = topics.get("유동인구")
-    if sig:
-        if "유동인구" in reason and isinstance(reason["유동인구"], str):
-            if sig == "high" and "강세" not in reason["유동인구"]:
-                reason["유동인구"] += "; LLM: 유동인구 강세"
-            elif sig == "mentioned" and "LLM" not in reason["유동인구"]:
-                reason["유동인구"] += "; LLM 언급"
-        else:
-            reason["유동인구"] = "LLM 언급: 유동인구 " + ("강세" if sig == "high" else "중요")
+    if sig == "high":
+        score += 7; bits.append("유동인구 강세")
+    elif sig == "mentioned":
+        score += 3; bits.append("유동인구 중요")
 
     # 직장인구
     sig = topics.get("직장인구")
-    if sig:
-        if "직장인구" in reason and isinstance(reason["직장인구"], str):
-            if sig == "high" and "강세" not in reason["직장인구"]:
-                reason["직장인구"] += "; LLM: 직장인 수요 강세"
-            elif sig == "mentioned" and "LLM" not in reason["직장인구"]:
-                reason["직장인구"] += "; LLM 언급"
-        else:
-            reason["직장인구"] = "LLM 언급: 직장인 수요 " + ("강세" if sig == "high" else "중요")
+    if sig == "high":
+        score += 7; bits.append("직장인 수요 강세")
+    elif sig == "mentioned":
+        score += 3; bits.append("직장인 수요 중요")
 
-    # 연령층 (set → 콤마 문자열)
+    # 연령층
     ages = topics.get("연령층") or set()
     if ages:
-        add = "LLM 언급: " + ", ".join(sorted(ages))
-        if "연령층" in reason and isinstance(reason["연령층"], str):
-            if add not in reason["연령층"]:
-                reason["연령층"] += ("; " if reason["연령층"] else "") + add
-        else:
-            reason["연령층"] = add
+        # 20/30대가 포함되면 가산점
+        if any(a.startswith(("20대", "30대")) for a in ages):
+            score += 3
+        bits.append("연령: " + ", ".join(sorted(ages)))
 
     # 임대료
     sig = topics.get("임대료")
-    if sig:
-        add = "LLM 언급: 임대료 " + ("저렴" if sig == "low" else "높음" if sig == "high" else "중요")
-        if "임대료" in reason and isinstance(reason["임대료"], str):
-            if add not in reason["임대료"]:
-                reason["임대료"] += ("; " if reason["임대료"] else "") + add
-        else:
-            reason["임대료"] = add
+    if sig == "low":
+        score += 4; bits.append("임대료 저렴")
+    elif sig == "high":
+        score -= 5; bits.append("임대료 높음")
+    elif sig == "mentioned":
+        bits.append("임대료 중요")
+
+    # 점수 범위 보정
+    score = max(60, min(score, 98))
+
+    # 최종 요약(LLM평가)만 reason에 추가
+    reason["LLM평가"] = f"{score}점 - " + " · ".join(bits) if bits else f"{score}점"
+
 
 
     return score, reason
 
 
+#=========================================
+# LLM 평가가 숫자(%)랑 모순이 없도록 하는 유틸
+#=========================================
+def _first_pct(s: Optional[str]) -> Optional[float]:
+    """문장 속 '123%' 같은 첫 퍼센트를 float로 추출"""
+    if not isinstance(s, str):
+        return None
+    m = re.search(r'(\d+(?:\.\d+)?)\s*%', s.replace(",", ""))
+    return float(m.group(1)) if m else None
+
+def _score_ratio(pct: Optional[float], *, high_is_good: bool) -> Tuple[str, int]:
+    """
+    퍼센트 구간에 따라 라벨/가점 산출
+    high_is_good=True  → 높을수록 가점(유동/직장)
+    high_is_good=False → 낮을수록 가점(임대)
+    """
+    if pct is None:
+        return ("정보부족", 0)
+
+    if high_is_good:
+        if pct >= 140:   return ("강함", +8)
+        if pct >= 120:   return ("양호", +5)
+        if pct >= 100:   return ("보통", +2)
+        if pct >=  80:   return ("약함", -3)
+        return ("매우 약함", -6)
+    else:
+        if pct <=  85:   return ("저렴", +6)
+        if pct <=  95:   return ("비교적 저렴", +3)
+        if pct <= 110:   return ("보통", 0)
+        if pct <= 130:   return ("다소 높음", -3)
+        return ("높음", -6)
+
+def _age_note(s: Optional[str]) -> Optional[str]:
+    """연령 문장을 간단 요약"""
+    if not isinstance(s, str):
+        return None
+    ages = []
+    for a in ["10대","20대","30대","40대","50대","60대이상","60대"]:
+        if a in s:
+            ages.append(a)
+    order = ["10대","20대","30대","40대","50대","60대","60대이상"]
+    ages = sorted(set(ages), key=order.index) if ages else []
+    pct = _first_pct(s)
+    if ages:
+        return f"주력 연령 {', '.join(ages)}" + (f"({pct:.0f}%)" if pct is not None else "")
+    return None
+
+def _calc_llm_eval_from_reason(reason: dict) -> Tuple[int, str]:
+    """
+    reason의 유동/직장/임대 문장에서 %를 뽑아 점수와 요약을 생성
+    """
+    base = 80
+    bits = []
+
+    flow_pct   = _first_pct(reason.get("유동인구"))
+    flow_tag,d = _score_ratio(flow_pct, high_is_good=True)
+    base += d
+    bits.append(f"유동 {flow_pct:.0f}%({flow_tag})" if flow_pct is not None else "유동 정보부족")
+
+    work_pct   = _first_pct(reason.get("직장인구"))
+    work_tag,d = _score_ratio(work_pct, high_is_good=True)
+    base += d
+    bits.append(f"직장 {work_pct:.0f}%({work_tag})" if work_pct is not None else "직장 정보부족")
+
+    rent_pct   = _first_pct(reason.get("임대료"))
+    rent_tag,d = _score_ratio(rent_pct, high_is_good=False)
+    base += d
+    bits.append(f"임대 {rent_pct:.0f}%({rent_tag})" if rent_pct is not None else "임대 정보부족")
+
+    an = _age_note(reason.get("연령층"))
+    if an: bits.append(an)
+
+    score = max(60, min(98, base))
+    return score, " · ".join(bits)
+
+
+#=============================
+# 업종 리포트 JSON을 만드는 곳
+#=============================
 def build_industry_report(type_small: str, dfs: dict, topk: int = 5) -> dict:
     flow_df     = _ensure_dong_norm(dfs.get("flow"))
     worker_df   = _ensure_dong_norm(dfs.get("worker"))
@@ -1247,6 +1326,10 @@ def build_industry_report(type_small: str, dfs: dict, topk: int = 5) -> dict:
             dong, flow_row, worker_row, resident_row, rent_row, seoul_avg, type_small,
             biz_feature_text=biz_text
         )
+
+        # ✅ 규칙기반으로 일단 일관된 “LLM평가” 생성해 reason에 심어둔다
+        _base_score, _base_msg = _calc_llm_eval_from_reason(reason)
+        reason["LLM평가"] = f"{_base_score}점 - {_base_msg}"
         scored.append((dong, score, reason))
 
 
@@ -1255,46 +1338,6 @@ def build_industry_report(type_small: str, dfs: dict, topk: int = 5) -> dict:
 
     # 1) 규칙기반 1차 후보(여유 폭: topk*2, 최소 6개)
     prelim = scored[:max(topk * 2, 6)]
-
-    # 2) (옵션) LLM 재랭킹
-    rerank_used = False
-    llm_ranked = _llm_rerank_candidates(type_small, prelim)  # [(region, score, reason, exp, conf), ...] or None
-
-    if llm_ranked:
-        rerank_used = True
-        # 상위 topk만 채택
-        top = llm_ranked[:topk]
-    else:
-        # LLM 미사용/실패 시 규칙기반 그대로
-        top = [(r, s, rsn, None, None) for (r, s, rsn) in scored[:topk]]
-
-    scored.sort(key=lambda x: x[1], reverse=True)
-
-    # === LLM 후보 생성: 항상 features 키를 채워 넣기 ===
-    WEIGHTS = {"상주인구": 0.1,"유동인구": 0.30, "직장인구": 0.20, "연령층": 0.20, "임대료": 0.20}
-    max_for_llm = 8  # LLM에 넘길 최대 후보 수 (너무 많으면 프롬프트가 길어짐)
-
-    candidates_for_llm = []
-    for dong, raw_score, reason in scored[:max_for_llm]:
-        # reason(dict)에 있는 4개 지표를 features로 정규화
-        feats = []
-        for k, w in WEIGHTS.items():
-            txt = reason.get(k)
-            # 문자열이 아닐 수도 있으니 문자열화
-            if txt is None:
-                txt = ""
-            feats.append({
-                "name": k,
-                "text": str(txt),
-                "weight": w
-            })
-        candidates_for_llm.append({
-            "region": dong,
-            "raw_score": float(raw_score),
-            "features": feats,                 # ✅ 항상 채워서 넘김
-            "reason": reason,                  # 참고용(LLM 프롬프트/파싱엔 안 써도 됨)
-        })
-
 
     # === (신규) LLM 재랭킹 시도 (실패 시 규칙기반 폴백) ===
     # 1) LLM에 보낼 후보(여유폭: topk*2, 최소 6개)
