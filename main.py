@@ -72,60 +72,6 @@ def _gen_biz_feature(type_small: str) -> str:
         base = "전반적으로 유동·직장·상주·임대료를 종합해 입지를 판단해야 하며, 주고객 연령과 시간대 일치가 성과에 직결됩니다."
     return f"{t}은(는) {base}"
 
-def _llm_rerank_candidates(type_small: str, prelim: list) -> Optional[list]:
-    """
-    prelim: [(region, base_score, reason_dict), ...]
-    반환: [(region, base_score, reason_dict, llm_explanation:str|None, confidence:float|None), ...]
-    """
-    if not USE_LLM_RERANK or _client is None:
-        return None
-    try:
-        # LLM 입력용 간단 JSON
-        payload = [
-            {"region": r, "base_score": round(float(s), 4), "reasons": rsn}
-            for (r, s, rsn) in prelim
-        ]
-        sys_prompt = (
-            "너는 상권 추천 재랭킹 모델이다. 업종과 후보들을 보고 더 설득력 있는 순서로 재정렬한다. "
-            "데이터 일관성(서술 간 모순 여부)과 업종-특성 적합성을 함께 고려해라. "
-            "반드시 JSON만 출력한다."
-        )
-        user_prompt = (
-            f"업종: {type_small}\n"
-            f"후보목록(JSON): {json.dumps(payload, ensure_ascii=False)}\n\n"
-            "출력 형식(JSON 예): {\n"
-            '  "ranked": [\n'
-            '    {"region":"역삼1동","explanation":"유동/직장 강점, 임대료 수용 가능","confidence":0.78},\n'
-            '    {"region":"서교동","explanation":"야간 유동/젊은층 강점","confidence":0.73}\n'
-            "  ]\n"
-            "}\n"
-            "반드시 위 스키마를 지켜서 JSON만 출력해."
-        )
-        resp = _client.chat.completions.create(
-            model=RERANK_MODEL,
-            messages=[{"role": "system", "content": sys_prompt},
-                      {"role": "user", "content": user_prompt}],
-            temperature=0.2,
-            max_tokens=600,
-        )
-        txt = (resp.choices[0].message.content or "").strip()
-        data = json.loads(txt)
-        ranked = data.get("ranked", [])
-        # region 기준으로 prelim 매칭
-        out = []
-        for item in ranked:
-            region = item.get("region")
-            if not region:
-                continue
-            match = next(((r, s, rsn) for (r, s, rsn) in prelim if r == region), None)
-            if match:
-                out.append((match[0], match[1], match[2], item.get("explanation"), item.get("confidence")))
-        return out or None
-    except Exception as e:
-        print(f"[경고] LLM 재랭킹 실패: {e}")
-        return None
-
-
 
 # ==============================
 # 설정 (필요 시 수정)
@@ -216,60 +162,41 @@ def _extract_features_for_llm(
 
 from typing import Optional
 
-LLM_RERANK_ENABLED = True  # 끄고 싶으면 False------------------>>>>
 
 def _llm_rerank_industry(type_small: str, prelim: list, topk: int = 5) -> Optional[list]:
-    """
-    prelim: [
-      {
-        "region": str,
-        "raw_score": float,
-        "features": [{"name": str, "text": str, "weight": float}, ...],  # <= 반드시 존재
-        "biz_feature": str (optional)
-      }, ...
-    ]
-    return: [{"region": str, "score": float, "rationale": str}, ...] or None
-    """
     if not LLM_RERANK_ENABLED or _client is None:
         return None
     try:
-        # 방어적으로 features를 보정 (혹시라도 None/누락이면 빈 리스트로)
+        # 1) 후보 스키마 정규화: raw_score 우선, 없으면 base_score 폴백
         safe_prelim = []
         for c in prelim:
-            feats = c.get("features") or []
-            # feats가 제대로 된 구조인지 한 번 더 보정
-            fixed_feats = []
-            for f in feats:
-                if not isinstance(f, dict):
-                    continue
-                fixed_feats.append({
-                    "name": f.get("name", ""),
-                    "text": str(f.get("text", "")),
-                    "weight": float(f.get("weight", 0.0))
-                })
+            # tuple 형태로 들어오는 경우도 방어
+            if isinstance(c, (list, tuple)) and len(c) >= 3:
+                c = {"region": c[0], "raw_score": c[1], "reasons": c[2]}
+            raw = float(c.get("raw_score", c.get("base_score", 0.0)))
             safe_prelim.append({
                 "region": c.get("region", ""),
-                "raw_score": float(c.get("raw_score", 0.0)),
-                "features": fixed_feats,
+                "raw_score": raw,
+                "reasons": c.get("reasons") or {},
                 "biz_feature": c.get("biz_feature", "")
             })
 
-        # 프롬프트 구성(간결 JSON)
+        # 2) 프롬프트: features.weight 대신 reasons를 평가하도록 명시
         user_payload = {
             "task": "RERANK_REGIONS_FOR_CATEGORY",
             "category": type_small,
             "candidates": safe_prelim,
             "topk": int(topk),
             "instructions": [
-                "각 후보의 features.weight를 가중치로 반영해 종합 점수를 매겨주세요.",
-                "텍스트는 정합성(모순/과장/의미불명 표현 여부)만 체크하여 감점 요인으로 활용.",
-                "최종 출력은 score 내림차순 정렬된 JSON 리스트",
-                "형식: [{\"region\": str, \"score\": float, \"rationale\": str}, ...]"
+                "각 후보의 raw_score를 초기 점수로 삼고, 'reasons'의 항목(유동인구/직장인구/연령층/임대료/상권특징)을 읽어 정합성/설득력에 따라 가감점해 종합 점수를 매기세요.",
+                "권장 가중치: 유동인구(0.30), 직장인구(0.20), 연령층(0.20), 임대료(0.20), 상권특징(0.10).",
+                "과장/모순/애매한 기술은 감점하세요.",
+                "최종 출력은 score 내림차순 JSON 리스트. 형식: [{\"region\": str, \"score\": float, \"rationale\": str}, ...]"
             ]
         }
 
         resp = _client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=RERANK_MODEL,
             messages=[
                 {"role": "system", "content": "You are a ranking assistant for retail site selection. Be concise and consistent."},
                 {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}
@@ -278,15 +205,13 @@ def _llm_rerank_industry(type_small: str, prelim: list, topk: int = 5) -> Option
             max_tokens=400
         )
         text = (resp.choices[0].message.content or "").strip()
-        # 파싱
+
         try:
             parsed = json.loads(text)
         except Exception:
-            # 모델이 코드블록으로 감싸거나 앞뒤로 말 붙일 수 있으니 숫자/키만 추출 시도
             m = re.search(r'\[.*\]', text, re.S)
             parsed = json.loads(m.group(0)) if m else []
 
-        # 최소 필드 검증
         out = []
         for item in parsed:
             region = item.get("region")
@@ -297,13 +222,13 @@ def _llm_rerank_industry(type_small: str, prelim: list, topk: int = 5) -> Option
         if not out:
             return None
 
-        # 상위 topk만
         out.sort(key=lambda x: x["score"], reverse=True)
         return out[:topk]
 
     except Exception as e:
         print(f"[경고] LLM 재랭킹 실패: {e}")
         return None
+
 
 
 # ==== biz_feature 키워드 추출기 =========================================
@@ -1071,13 +996,15 @@ def _industry_score_and_reason(
     rent_row: Optional[pd.Series],
     seoul_avg: dict,
     type_small: str,
-    biz_feature_text: Optional[str] = None  # ★ 추가
+    biz_feature_text: Optional[str] = None  # 파라미터는 남겨도 무방
 ):
-
+    # ---- 원천 지표 추출 ----
     total_flow = float(flow_row.get("총_유동인구수")) if isinstance(flow_row, pd.Series) and pd.notna(flow_row.get("총_유동인구수")) else 0.0
+
     worker_20_40 = 0.0
     if isinstance(worker_row, pd.Series):
         worker_20_40 = _sum_cols(worker_row, ["20대_직장인구수","30대_직장인구수","40대_직장인구수"])
+
     resident_30_40 = 0.0
     if isinstance(resident_row, pd.Series):
         resident_30_40 = _sum_cols(resident_row, ["30대_상주인구수","40대_상주인구수"])
@@ -1092,21 +1019,24 @@ def _industry_score_and_reason(
             except:
                 rent_val = None
 
-    flow_ratio = _safe_ratio(total_flow, seoul_avg.get("flow_avg", 1.0))
-    worker_ratio = _safe_ratio(worker_20_40, seoul_avg.get("worker_20_40_avg", 1.0))
+    # ---- 서울 평균 대비 비율 ----
+    flow_ratio     = _safe_ratio(total_flow, seoul_avg.get("flow_avg", 1.0))
+    worker_ratio   = _safe_ratio(worker_20_40, seoul_avg.get("worker_20_40_avg", 1.0))
     resident_ratio = _safe_ratio(resident_30_40, seoul_avg.get("resident_30_40_avg", 1.0))
 
     rent_ratio_to_seoul = None
     if rent_val is not None and seoul_avg.get("rent_avg"):
         rent_ratio_to_seoul = _safe_ratio(rent_val, seoul_avg["rent_avg"])
 
-    score = 0.0
-    score += 0.40 * flow_ratio
-    score += 0.30 * worker_ratio
-    score += 0.20 * resident_ratio
+    # ---- (정량) 점수 계산: 이 값만 반환 ----
+    quant_score = 0.0
+    quant_score += 0.40 * flow_ratio
+    quant_score += 0.30 * worker_ratio
+    quant_score += 0.20 * resident_ratio
     if rent_ratio_to_seoul is not None:
-        score += 0.10 * (1.2 - min(1.2, rent_ratio_to_seoul))  # 싸면 가점
+        quant_score += 0.10 * (1.2 - min(1.2, rent_ratio_to_seoul))  # 싸면 가점
 
+    # ---- 사유(reason) 문자열 구성 (그대로 유지) ----
     reason = {}
     reason["유동인구"] = f"서울 평균 대비 약 {flow_ratio*100:.0f}% 수준으로 {'높음' if flow_ratio>=1.1 else '안정적 수준' if flow_ratio>=0.95 else '비교적 낮음'}"
     if isinstance(worker_row, pd.Series):
@@ -1127,53 +1057,9 @@ def _industry_score_and_reason(
         reason["임대료"] = f"서울 평균 대비 {rent_ratio_to_seoul*100:.0f}% 수준으로 {'높음' if rent_ratio_to_seoul>=1.1 else '안정적 수준' if rent_ratio_to_seoul>=0.95 else '비교적 낮음'}"
     reason["상권특징"] = LOCAL_HINTS.get(dong, "해당 행정동의 입지 특성 데이터가 없습니다.")
 
-    # ---- biz_feature에서 키워드 추출 → 요약형 'LLM평가' 생성 ----
-    topics = _extract_topics_from_biz_feature(biz_feature_text)
+    # ✅ LLM 프리뷰 점수/텍스트는 만들지 않음(삭제). build_industry_report()에서 _calc_llm_eval_from_reason()로 생성함.
+    return quant_score, reason
 
-    # 점수 초기값과 요약 이유 조각들
-    score = 80
-    bits = []
-
-    # 유동인구
-    sig = topics.get("유동인구")
-    if sig == "high":
-        score += 7; bits.append("유동인구 강세")
-    elif sig == "mentioned":
-        score += 3; bits.append("유동인구 중요")
-
-    # 직장인구
-    sig = topics.get("직장인구")
-    if sig == "high":
-        score += 7; bits.append("직장인 수요 강세")
-    elif sig == "mentioned":
-        score += 3; bits.append("직장인 수요 중요")
-
-    # 연령층
-    ages = topics.get("연령층") or set()
-    if ages:
-        # 20/30대가 포함되면 가산점
-        if any(a.startswith(("20대", "30대")) for a in ages):
-            score += 3
-        bits.append("연령: " + ", ".join(sorted(ages)))
-
-    # 임대료
-    sig = topics.get("임대료")
-    if sig == "low":
-        score += 4; bits.append("임대료 저렴")
-    elif sig == "high":
-        score -= 5; bits.append("임대료 높음")
-    elif sig == "mentioned":
-        bits.append("임대료 중요")
-
-    # 점수 범위 보정
-    score = max(60, min(score, 98))
-
-    # 최종 요약(LLM평가)만 reason에 추가
-    reason["LLM평가"] = f"{score}점 - " + " · ".join(bits) if bits else f"{score}점"
-
-
-
-    return score, reason
 
 
 #=========================================
@@ -1330,35 +1216,24 @@ def build_industry_report(type_small: str, dfs: dict, topk: int = 5) -> dict:
             biz_feature_text=biz_text
         )
 
-        # ✅ 규칙기반으로 일단 일관된 “LLM평가” 생성해 reason에 심어둔다
+        # (선택) LLM평가 산출 로직이 별도로 있다면 여기서 reason["LLM평가"] 세팅
         _base_score, _base_msg = _calc_llm_eval_from_reason(reason)
         reason["LLM평가"] = f"{_base_score}점 - {_base_msg}"
+
         scored.append((dong, score, reason))
 
-
-
-    
-
-    # 1) 규칙기반 1차 후보(여유 폭: topk*2, 최소 6개)
+    # ✅ 여기서 정렬 + 잘라내기
+    scored.sort(key=lambda x: x[1], reverse=True)
     prelim = scored[:max(topk * 2, 6)]
 
     # === LLM 재랭킹 후보 구성 (스키마 맞추기) ===
-    WEIGHTS = {"유동인구": 0.30, "직장인구": 0.20, "연령층": 0.20, "임대료": 0.20, "상권특징": 0.10}
-
-    candidates_for_llm = []
-    for (d, s, r) in prelim:
-        feats = []
-        for k, w in WEIGHTS.items():
-            feats.append({"name": k, "text": str(r.get(k, "")), "weight": float(w)})
-        candidates_for_llm.append({
-            "region": d,
-            "raw_score": float(s),   # ← 반드시 raw_score
-            "features": feats,       # ← 반드시 features[]
-            "biz_feature": ""        # 선택사항(있으면 넣기)
-        })
-
-
+    candidates_for_llm = [
+        {"region": d, "raw_score": float(s), "reasons": r, "biz_feature": biz_text}
+        for (d, s, r) in prelim
+    ]
     reranked = _llm_rerank_industry(type_small, candidates_for_llm, topk=topk)
+
+
 
     out = {
         "type_small": type_small,
