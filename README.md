@@ -8,13 +8,13 @@ flowchart LR
     BE[Backend] -->|HTTP| API
   end
 
-  subgraph AI_Service["AI API (FastAPI)"]
-    API["api.py<br/>/healthz<br/>/report/industry<br/>/report/region"]
-    CORE["main.py<br/>build_industry_report()<br/>_industry_score_and_reason()"]
-    LOADER["data_loader.py<br/>load_all_data()"]
+  subgraph AI_Service[AI API (FastAPI)]
+    API["api.py\n/healthz\n/report/industry\n/report/region"]
+    CORE["main.py\nbuild_industry_report()\n_industry_score_and_reason()"]
+    LOADER["data_loader.py\nload_all_data()"]
     HINTS[(local_hints/*.json)]
     DATA[(raw_data/*.csv, *.xlsx)]
-    LLM["OpenAI API<br/>(옵션, 실패 시 폴백)"]
+    LLM["OpenAI API\n(옵션, 실패 시 폴백)"]
   end
 
   API --> CORE
@@ -23,11 +23,12 @@ flowchart LR
   CORE --> HINTS
   CORE -->|옵션| LLM
 
-  subgraph Platform["Railway (Container)"]
-    UVICORN["uvicorn<br/>PORT=$PORT"]
+  subgraph Platform[Railway (Container)]
+    UVICORN["uvicorn\nPORT=$PORT"]
   end
 
   API <-->|stdout logs| UVICORN
+
 ```
 
 ```mermaid
