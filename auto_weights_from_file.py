@@ -70,7 +70,7 @@ OFFICE_LUNCH_KEYWORDS = [
 # 키워드 우선순위: 오피스런치 ▶ 의료 ▶ 교육 ▶ 생활서비스 ▶ F&B
 WEIGHT_PRESETS = [
     (set(OFFICE_LUNCH_KEYWORDS), dict(flow=0.30, worker=0.45, resident=0.15, rent=0.10)),
-    (set(MEDICAL_KEYWORDS),      dict(flow=0.20, worker=0.35, resident=0.25, rent=0.20)),
+    (set(MEDICAL_KEYWORDS),      dict(flow=0.10, worker=0.25, resident=0.35, rent=0.30)), # 가중치 조절
     (set(EDU_KEYWORDS),          dict(flow=0.20, worker=0.10, resident=0.50, rent=0.20)),
     (set(SERVICE_KEYWORDS),      dict(flow=0.25, worker=0.15, resident=0.45, rent=0.15)),
     (set(FNB_KEYWORDS),          dict(flow=0.50, worker=0.25, resident=0.15, rent=0.10)),
