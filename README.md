@@ -8,7 +8,7 @@ flowchart LR
     BE[Backend] -->|HTTP| API
   end
 
-  subgraph AI_Service[AI API (FastAPI)]
+  subgraph AI_Service["AI API (FastAPI)"]
     API["api.py\n/healthz\n/report/industry\n/report/region"]
     CORE["main.py\nbuild_industry_report()\n_industry_score_and_reason()"]
     LOADER["data_loader.py\nload_all_data()"]
@@ -23,11 +23,12 @@ flowchart LR
   CORE --> HINTS
   CORE -->|옵션| LLM
 
-  subgraph Platform[Railway (Container)]
+  subgraph Platform["Railway (Container)"]
     UVICORN["uvicorn\nPORT=$PORT"]
   end
 
   API <-->|stdout logs| UVICORN
+
 
 ```
 
