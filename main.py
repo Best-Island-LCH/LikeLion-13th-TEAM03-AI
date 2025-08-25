@@ -5,6 +5,7 @@ import re
 import json
 from typing import Optional, Dict, Any, List, Tuple
 import pandas as pd
+from auto_weights_from_file import derive_weights_from_type
 
 # -----------------------------
 # (선택) OpenAI: 설정되어 있으면 사용, 아니면 자동 Fallback
@@ -31,6 +32,8 @@ RERANK_MODEL = os.getenv("GPT_MODEL", "gpt-4o-mini")
 # 재랭킹 토글: env로 제어
 LLM_RERANK_ENABLED = os.getenv("USE_LLM_RERANK", "0").strip() == "1"
 
+##
+USE_SMART_WEIGHTS = os.getenv("USE_SMART_WEIGHTS", "0").strip() == "1"
 
 # -----------------------------
 # AI로 biz_feature 생성 (실패 시 규칙기반 Fallback)
@@ -431,6 +434,118 @@ def _resolve_gu_from_dfs(region_name: str, dfs: Dict[str, Optional[pd.DataFrame]
                 if isinstance(val, str) and val.strip():
                     return _norm_region(val)
     return None
+
+# ==================================
+# ======= 가중치 자동 산출 유틸 =======
+# ==================================
+
+_WEIGHT_KEYS = ("flow", "worker", "resident", "rent")
+
+def _norm_weights(w: Dict[str, float]) -> Dict[str, float]:
+    """음수 제거, 합=1로 정규화, 키 누락 보정"""
+    v = {k: max(0.0, float(w.get(k, 0.0))) for k in _WEIGHT_KEYS}
+    s = sum(v.values())
+    if s <= 0:
+        v = {"flow": 0.40, "worker": 0.30, "resident": 0.20, "rent": 0.10}
+        s = 1.0
+    return {k: v[k] / s for k in _WEIGHT_KEYS}
+
+def _weights_rule_based(type_small: str) -> Dict[str, float]:
+    """키워드 규칙 기반 베이스 가중치"""
+    t = (type_small or "").strip()
+    rules = [
+        (["카페","커피","디저트","분식","치킨","피자","한식","일식","중식","양식","면","고기","포장마차","술집","주점","바","호프"],
+         dict(flow=0.50, worker=0.25, resident=0.15, rent=0.10)),
+        (["미용","헤어","네일","피부","마사지","편의","편의점","세탁"],
+         dict(flow=0.25, worker=0.15, resident=0.45, rent=0.15)),
+        (["학원","교육","교습","입시","독서실","스터디"],
+         dict(flow=0.20, worker=0.10, resident=0.50, rent=0.20)),
+        (["병원","의원","의료","치과","약국","내과","외과","피부과"],
+         dict(flow=0.20, worker=0.35, resident=0.25, rent=0.20)),
+        (["사무","오피스","도시락","점심","런치"],
+         dict(flow=0.30, worker=0.45, resident=0.15, rent=0.10)),
+    ]
+    for keys, w in rules:
+        if any(k in t for k in keys):
+            return _norm_weights(w)
+    return _norm_weights(dict(flow=0.40, worker=0.30, resident=0.20, rent=0.10))
+
+def _weights_from_biz_feature(text: Optional[str], base: Dict[str, float]) -> Dict[str, float]:
+    """biz_feature의 신호로 베이스 가중치를 살짝 조정(+/- 0.05씩)"""
+    if not text:
+        return base
+    adj = dict(base)
+    t = text
+
+    # 유동/직장/임대 언급 강도에 따라 미세 조정
+    topics = _extract_topics_from_biz_feature(t)  # 이미 파일에 있음
+    if topics.get("유동인구") == "high":
+        adj["flow"] += 0.05
+    if topics.get("직장인구") == "high":
+        adj["worker"] += 0.05
+    if topics.get("임대료") == "low":
+        adj["rent"] += 0.05
+    elif topics.get("임대료") == "high":
+        # 임대료가 높으면 임대 고려 비중을 조금 늘려 리스크 반영
+        adj["rent"] += 0.03
+
+    # 연령 신호(젊은층) → 유동/직장 쪽 비중 소폭 상승
+    ages = topics.get("연령층") or set()
+    if "젊은층" in ages:
+        adj["flow"] += 0.02
+        adj["worker"] += 0.02
+
+    return _norm_weights(adj)
+
+def _weights_llm_from_type(type_small: str, base: Optional[Dict[str, float]] = None) -> Optional[Dict[str, float]]:
+    """LLM로 업종 자연어 분류 → 가중치 제안(JSON). 실패 시 None."""
+    if _client is None:
+        return None
+    try:
+        payload = {
+            "task": "CATEGORY_WEIGHTING",
+            "type_text": type_small,
+            "base": base or {"flow":0.40,"worker":0.30,"resident":0.20,"rent":0.10},
+            "keys": list(_WEIGHT_KEYS),
+            "requirements": [
+                "weights는 flow/worker/resident/rent 4개 키만 포함",
+                "숫자(0~1), 합은 1.0에 가깝게",
+                "JSON만 출력"
+            ]
+        }
+        resp = _client.chat.completions.create(
+            model=RERANK_MODEL,
+            messages=[
+                {"role": "system", "content": "너는 업종 텍스트를 읽고 입지 분석 가중치를 정하는 도우미다."},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}
+            ],
+            temperature=0.2,
+            max_tokens=200,
+        )
+        txt = (resp.choices[0].message.content or "").strip()
+        try:
+            data = json.loads(txt)
+        except Exception:
+            m = re.search(r"\{.*\}", txt, re.S)
+            data = json.loads(m.group(0)) if m else {}
+        w = data.get("weights") or data  # {"weights": {...}} 또는 {...} 둘 다 허용
+        if not isinstance(w, dict):
+            return None
+        return _norm_weights(w)
+    except Exception as e:
+        print(f"[경고] 스마트 가중치 LLM 실패: {e}")
+        return None
+
+def _weights_for(type_small: str, *, biz_feature_text: Optional[str] = None) -> Dict[str, float]:
+    """최종 가중치: 규칙 → biz_feature 미세조정 → (옵션) LLM"""
+    base = _weights_rule_based(type_small)
+    tuned = _weights_from_biz_feature(biz_feature_text, base)
+    if USE_SMART_WEIGHTS:
+        w_llm = _weights_llm_from_type(type_small, base=tuned)
+        if w_llm:
+            return w_llm
+    return tuned
+
 
 
 # ==============================
@@ -1029,12 +1144,18 @@ def _industry_score_and_reason(
         rent_ratio_to_seoul = _safe_ratio(rent_val, seoul_avg["rent_avg"])
 
     # ---- (정량) 점수 계산: 이 값만 반환 ----
+    # 기존: 고정 가중치 0.40/0.30/0.20/0.10
+    # 변경: 업종 자연어 매칭 기반 가중치
+    weights = derive_weights_from_type(type_small)   # ★ 추가
     quant_score = 0.0
-    quant_score += 0.40 * flow_ratio
-    quant_score += 0.30 * worker_ratio
-    quant_score += 0.20 * resident_ratio
+    quant_score += weights["flow"]     * flow_ratio
+    quant_score += weights["worker"]   * worker_ratio
+    quant_score += weights["resident"] * resident_ratio
     if rent_ratio_to_seoul is not None:
-        quant_score += 0.10 * (1.2 - min(1.2, rent_ratio_to_seoul))  # 싸면 가점
+        quant_score += weights["rent"] * (1.2 - min(1.2, rent_ratio_to_seoul))  # 싸면 가점
+
+    print(f"[WEIGHTS] {type_small} -> {w}")
+
 
     # ---- 사유(reason) 문자열 구성 (그대로 유지) ----
     reason = {}
