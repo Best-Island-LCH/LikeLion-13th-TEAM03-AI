@@ -25,9 +25,12 @@ if _OPENAI_AVAILABLE:
         except Exception:
             _client = None
 
-# === LLM 재랭킹 토글 (환경변수 USE_LLM_RERANK=1 이면 켜짐) ===
-USE_LLM_RERANK = os.getenv("USE_LLM_RERANK", "0").strip() == "1"
-RERANK_MODEL = "gpt-4o-mini"
+# 모델명: env로 제어
+RERANK_MODEL = os.getenv("GPT_MODEL", "gpt-4o-mini")
+
+# 재랭킹 토글: env로 제어
+LLM_RERANK_ENABLED = os.getenv("USE_LLM_RERANK", "0").strip() == "1"
+
 
 # -----------------------------
 # AI로 biz_feature 생성 (실패 시 규칙기반 Fallback)
@@ -1339,17 +1342,21 @@ def build_industry_report(type_small: str, dfs: dict, topk: int = 5) -> dict:
     # 1) 규칙기반 1차 후보(여유 폭: topk*2, 최소 6개)
     prelim = scored[:max(topk * 2, 6)]
 
-    # === (신규) LLM 재랭킹 시도 (실패 시 규칙기반 폴백) ===
-    # 1) LLM에 보낼 후보(여유폭: topk*2, 최소 6개)
-    prelim = scored[:max(topk * 2, 6)]
-    candidates_for_llm = [
-        {
+    # === LLM 재랭킹 후보 구성 (스키마 맞추기) ===
+    WEIGHTS = {"유동인구": 0.30, "직장인구": 0.20, "연령층": 0.20, "임대료": 0.20, "상권특징": 0.10}
+
+    candidates_for_llm = []
+    for (d, s, r) in prelim:
+        feats = []
+        for k, w in WEIGHTS.items():
+            feats.append({"name": k, "text": str(r.get(k, "")), "weight": float(w)})
+        candidates_for_llm.append({
             "region": d,
-            "base_score": float(s),
-            "reasons": r  # dict
-        }
-        for (d, s, r) in prelim
-    ]
+            "raw_score": float(s),   # ← 반드시 raw_score
+            "features": feats,       # ← 반드시 features[]
+            "biz_feature": ""        # 선택사항(있으면 넣기)
+        })
+
 
     reranked = _llm_rerank_industry(type_small, candidates_for_llm, topk=topk)
 
