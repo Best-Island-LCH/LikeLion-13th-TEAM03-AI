@@ -34,22 +34,14 @@ if USE_REAL and API_KEY and OpenAI is not None:
         client = None
         print(f"[경고] OpenAI 클라이언트 초기화 실패: {e}")
 
-
-
-
-
+#==============================================================
 # gpt_client.py ─ 클라이언트 초기화 블록 바로 아래에 추가
 print("[LLM-BOOT] OPENAI_API_KEY set?:", bool(API_KEY))
 print("[LLM-BOOT] GPT_USE_REAL:", USE_REAL)
 print("[LLM-BOOT] OpenAI SDK available?:", OpenAI is not None)
 print("[LLM-BOOT] client:", "ON" if client else "OFF")
 print("[LLM-BOOT] model:", DEFAULT_MODEL)
-
-
-
-
-
-
+#================================================================
 
 def _dummy_response(prompt: str) -> str:
     """
