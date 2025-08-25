@@ -1154,9 +1154,6 @@ def _industry_score_and_reason(
     if rent_ratio_to_seoul is not None:
         quant_score += weights["rent"] * (1.2 - min(1.2, rent_ratio_to_seoul))  # 싸면 가점
 
-    print(f"[WEIGHTS] {type_small} -> {w}")
-
-
     # ---- 사유(reason) 문자열 구성 (그대로 유지) ----
     reason = {}
     reason["유동인구"] = f"서울 평균 대비 약 {flow_ratio*100:.0f}% 수준으로 {'높음' if flow_ratio>=1.1 else '안정적 수준' if flow_ratio>=0.95 else '비교적 낮음'}"
